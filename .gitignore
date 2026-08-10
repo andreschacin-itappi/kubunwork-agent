@@ -1,0 +1,8 @@
+# Dependencias — se reinstalan con `npm ci`
+node_modules/
+
+# Salidas de empaquetado (los .zip/.exe/.dmg generados)
+dist/
+
+# Descargas de Electron cacheadas por los scripts de build
+build/.cache/

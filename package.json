@@ -1,0 +1,20 @@
+{
+  "name": "itappi-tracking-agent",
+  "productName": "Itappi Tracking Agent",
+  "version": "0.1.0",
+  "description": "Agente de escritorio que mide actividad y tiempo trabajado, y lo sincroniza con el servidor de tracking.",
+  "main": "src/main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "package:win": "node build/package-win.mjs",
+    "test": "node --test test/"
+  },
+  "dependencies": {
+    "uiohook-napi": "^1.5.4"
+  },
+  "devDependencies": {
+    "electron": "43.3.0",
+    "resedit": "^3.0.2"
+  }
+}
