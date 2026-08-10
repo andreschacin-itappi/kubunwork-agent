@@ -1,0 +1,39 @@
+# Compila el agente para macOS en una Mac real de GitHub y publica los .dmg
+# como artifacts descargables. Se lanza a mano (pestaña Actions → Run workflow)
+# o automáticamente con cada push a main.
+name: Build macOS
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - name: Descargar el código
+        uses: actions/checkout@v4
+
+      - name: Instalar Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Ejecutar pruebas
+        run: npm test
+
+      # Genera dist/ItappiTrackingAgent-<versión>-mac-arm64.dmg (Apple Silicon)
+      # y -mac-x64.dmg (Intel)
+      - name: Empaquetar .app y .dmg (arm64 + x64)
+        run: npm run package:mac
+
+      - name: Publicar los .dmg como artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ItappiTrackingAgent-macOS
+          path: dist/*.dmg
+          if-no-files-found: error

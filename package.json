@@ -8,6 +8,7 @@
   "scripts": {
     "start": "electron .",
     "package:win": "node build/package-win.mjs",
+    "package:mac": "node build/package-mac.mjs",
     "test": "node --test test/"
   },
   "dependencies": {
