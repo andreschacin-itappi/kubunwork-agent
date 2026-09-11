@@ -33,6 +33,7 @@ body {
   flex-direction: column;
   gap: 16px;
   height: 100%;
+  overflow-y: auto;
   padding: 24px;
 }
 
@@ -69,8 +70,25 @@ body {
 }
 
 .brand h1 {
+  align-items: center;
+  display: flex;
   font-size: 18px;
   font-weight: 600;
+  gap: 8px;
+}
+
+.version-tag {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+}
+
+.version-line {
+  margin-top: 2px;
 }
 
 form {
@@ -177,6 +195,99 @@ button:disabled {
   padding: 6px 12px;
 }
 
+.topbar-actions {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.icon-btn {
+  align-items: center;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  color: var(--muted);
+  display: flex;
+  font-size: 13px;
+  font-style: italic;
+  font-weight: 700;
+  height: 26px;
+  justify-content: center;
+  padding: 0;
+  width: 26px;
+}
+.icon-btn:hover {
+  color: var(--text);
+}
+
+.modal-overlay {
+  align-items: center;
+  background: rgba(6, 7, 10, 0.6);
+  display: flex;
+  inset: 0;
+  justify-content: center;
+  padding: 24px;
+  position: fixed;
+  z-index: 10;
+}
+
+.modal {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  display: flex;
+  flex-direction: column;
+  max-height: 100%;
+  overflow: hidden;
+  width: 100%;
+}
+
+.modal-head {
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  justify-content: space-between;
+  padding: 14px 16px;
+}
+
+.modal-head h2 {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.modal-head .icon-btn {
+  font-style: normal;
+  font-size: 16px;
+}
+
+.modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  overflow-y: auto;
+  padding: 16px;
+  user-select: text;
+}
+
+.modal-body h3 {
+  color: #b6bcca;
+  font-size: 12px;
+  font-weight: 600;
+  margin-bottom: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.modal-body p {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.modal-body strong {
+  color: var(--text);
+}
+
 .name {
   font-size: 15px;
   font-weight: 600;
@@ -207,13 +318,77 @@ button:disabled {
 .status.active {
   color: var(--ok);
 }
-.status.idle {
+.status.idle,
+.status.paused {
   color: var(--warn);
+}
+.status.sent {
+  color: var(--ok);
+}
+
+.bucket-row {
+  align-items: baseline;
+  color: var(--muted);
+  display: flex;
+  font-size: 11px;
+  justify-content: space-between;
+  margin-top: 2px;
+  width: 100%;
+}
+
+.bucket-row span:last-child {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.bucket-bar {
+  background: var(--panel-2);
+  border-radius: 4px;
+  height: 5px;
+  overflow: hidden;
+  width: 100%;
+}
+
+.bucket-bar-fill {
+  background: var(--accent);
+  height: 100%;
+  transition: width 1s linear, background 0.2s;
+  width: 0%;
+}
+.bucket-bar-fill.sent {
+  background: var(--ok);
+  width: 100% !important;
+}
+.bucket-bar-fill.paused {
+  background: var(--warn);
+  width: 100% !important;
+}
+
+.bucket-explainer {
+  line-height: 1.5;
+  text-align: center;
+}
+.bucket-explainer strong {
+  color: #b6bcca;
 }
 
 .timer-card button {
   margin-top: 6px;
   width: 100%;
+}
+
+.toggle-row {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+  width: 100%;
+}
+.toggle-row button {
+  margin-top: 0;
+  width: auto;
+  flex: 1;
 }
 
 .stats {
@@ -260,6 +435,32 @@ button:disabled {
 
 .row:last-child {
   border-bottom: none;
+}
+
+.row-label {
+  align-items: center;
+  display: flex;
+  gap: 6px;
+}
+
+.info-dot {
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  color: var(--muted);
+  cursor: help;
+  display: flex;
+  font-size: 10px;
+  font-style: italic;
+  font-weight: 700;
+  height: 15px;
+  justify-content: center;
+  width: 15px;
+}
+.info-dot:hover,
+.info-dot:focus-visible {
+  color: var(--text);
+  outline: none;
 }
 
 #sync-state.ok {
@@ -312,17 +513,6 @@ button:disabled {
 .switch input:checked + .slider::before {
   background: #fff;
   transform: translateX(18px);
-}
-
-.actions {
-  display: grid;
-  gap: 8px;
-  grid-template-columns: 1fr 1fr;
-}
-
-.actions button {
-  font-size: 12px;
-  padding: 9px;
 }
 
 #server-label {

@@ -158,12 +158,18 @@ function installElectronStub({ userData, hookAvailable }) {
       return this._ready;
     },
     quit() {},
-    loginItem: { openAtLogin: false },
-    getLoginItemSettings() {
-      return { ...this.loginItem };
+    // Real Electron on Windows only reports openAtLogin: true when the args
+    // passed to getLoginItemSettings match what setLoginItemSettings stored —
+    // callers that check with mismatched (or missing) args always get false
+    // back, even though the registry entry exists.
+    loginItem: { openAtLogin: false, args: [] },
+    getLoginItemSettings(options = {}) {
+      const args = options.args || [];
+      const argsMatch = JSON.stringify(args) === JSON.stringify(this.loginItem.args);
+      return { openAtLogin: this.loginItem.openAtLogin && argsMatch };
     },
     setLoginItemSettings(settings) {
-      this.loginItem = { ...this.loginItem, ...settings };
+      this.loginItem = { openAtLogin: false, args: [], ...settings };
     },
   });
 
@@ -315,7 +321,7 @@ test("wrong credentials surface a message and start nothing", async () => {
   }
 });
 
-test("login pulls server config, starts tracking and authenticates every call", async () => {
+test("login pulls server config and authenticates every call, without starting tracking on its own", async () => {
   const backend = await startFakeBackend();
   const agent = await bootAgent();
   try {
@@ -330,7 +336,7 @@ test("login pulls server config, starts tracking and authenticates every call", 
     assert.equal(state.authenticated, true);
     assert.equal(state.employee.name, "Ana Pérez");
     assert.equal(state.employee.department, "Marketing");
-    assert.equal(state.tracker.running, true, "el cronómetro arranca tras iniciar sesión");
+    assert.equal(state.tracker.running, false, "el empleado tiene que pulsar Iniciar explícitamente");
 
     // Config came from the server, not from the built-in defaults.
     assert.equal(state.config.bucketDurationSeconds, BUCKET_SECONDS);
@@ -354,6 +360,7 @@ test("a real bucket reaches the server and passes the backend's validation", asy
       email: "ana@empresa.com",
       password: "correcta",
     });
+    await agent.invoke("agent:start");
 
     // Let the real clock close at least one bucket.
     await sleep((BUCKET_SECONDS + 2) * 1000);
@@ -386,6 +393,7 @@ test("without the input hook the agent still measures time, in fallback mode", a
       email: "ana@empresa.com",
       password: "correcta",
     });
+    await agent.invoke("agent:start");
 
     const state = await agent.invoke("agent:get-state");
     assert.equal(state.tracker.captureMode, "fallback");
@@ -414,6 +422,7 @@ test("the session survives a restart of the agent", async () => {
       email: "ana@empresa.com",
       password: "correcta",
     });
+    await first.invoke("agent:start");
     userData = first.userData;
     await sleep(2500);
     await first.invoke("agent:sync-now");
@@ -433,7 +442,7 @@ test("the session survives a restart of the agent", async () => {
     assert.equal(state.authenticated, true, "no debe pedir la contraseña otra vez");
     assert.equal(state.employee.name, "Ana Pérez");
     assert.ok(state.tracker.trackedSeconds >= 2, "conserva el tiempo del día");
-    assert.equal(state.tracker.running, true, "reanuda la medición tras reiniciar");
+    assert.equal(state.tracker.running, false, "no reanuda sola — hace falta volver a pulsar Iniciar");
   } finally {
     stub.restore();
     backend.close();
@@ -449,6 +458,7 @@ test("an unreachable server queues locally instead of losing data", async () => 
       email: "ana@empresa.com",
       password: "correcta",
     });
+    await agent.invoke("agent:start");
 
     backend.close(); // the network drops mid-shift
     await sleep((BUCKET_SECONDS + 2) * 1000);
@@ -492,13 +502,17 @@ test("the autostart toggle reaches the OS integration", async () => {
   const agent = await bootAgent();
   try {
     await agent.invoke("agent:set-autostart", true);
-    const settings = agent.electron.app.getLoginItemSettings();
-    assert.equal(settings.openAtLogin, true);
     // --hidden keeps the window out of the way on a login-triggered launch.
     assert.deepEqual(agent.electron.app.loginItem.args, ["--hidden"]);
 
+    // The renderer only ever sees autoStart via agent:get-state — reading the
+    // raw mock with mismatched args would mask a regression here.
+    let state = await agent.invoke("agent:get-state");
+    assert.equal(state.autoStart, true);
+
     await agent.invoke("agent:set-autostart", false);
-    assert.equal(agent.electron.app.getLoginItemSettings().openAtLogin, false);
+    state = await agent.invoke("agent:get-state");
+    assert.equal(state.autoStart, false);
   } finally {
     agent.restore();
   }

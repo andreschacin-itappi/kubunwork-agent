@@ -14,7 +14,7 @@
     <section id="view-login" class="view">
       <header class="brand">
         <div class="brand-mark"></div>
-        <h1>Tracking Agent</h1>
+        <h1>Tracking Agent <span class="version-tag">v2</span></h1>
         <p class="muted">Inicia sesión con tu cuenta de empleado</p>
       </header>
 
@@ -48,14 +48,30 @@
           <p class="name" id="emp-name">—</p>
           <p class="muted small" id="emp-dept">—</p>
         </div>
-        <button id="logout" class="ghost" type="button">Salir</button>
+        <div class="topbar-actions">
+          <button id="info-open" class="icon-btn" type="button" title="Cómo funciona" aria-haspopup="dialog">i</button>
+          <button id="logout" class="ghost" type="button">Salir</button>
+          <span class="info-dot" tabindex="0" title="Cierra tu sesión en este agente. Vas a tener que volver a iniciar sesión con tu correo y contraseña para seguir registrando tiempo.">i</span>
+        </div>
       </header>
 
       <div class="timer-card">
         <p class="muted small">Tiempo registrado hoy</p>
         <p class="timer" id="timer">00:00:00</p>
+
+        <div class="bucket-row" id="bucket-row" hidden>
+          <span>Bucket actual</span>
+          <span id="bucket-time">15:00</span>
+        </div>
+        <div class="bucket-bar" id="bucket-bar" hidden>
+          <div class="bucket-bar-fill" id="bucket-bar-fill"></div>
+        </div>
+
         <p class="status" id="status-line">En pausa</p>
-        <button id="toggle" class="primary" type="button">Iniciar</button>
+        <div class="toggle-row">
+          <button id="toggle" class="primary" type="button">Iniciar</button>
+          <span class="info-dot" tabindex="0" title="Inicia o pausa el registro de tu tiempo y actividad. Podés pausarlo cuando quieras, por ejemplo en un descanso — nadie más lo pausa por vos.">i</span>
+        </div>
       </div>
 
       <div class="stats">
@@ -75,19 +91,31 @@
 
       <div class="rows">
         <div class="row">
-          <span>Sincronización</span>
+          <span class="row-label">
+            Sincronización
+            <span class="info-dot" tabindex="0" title="Hace cuánto se enviaron tus datos de actividad al servidor. Se sincroniza sola cada cierto tiempo.">i</span>
+          </span>
           <span id="sync-state" class="muted">—</span>
         </div>
         <div class="row">
-          <span>Pendientes por enviar</span>
+          <span class="row-label">
+            Pendientes por enviar
+            <span class="info-dot" tabindex="0" title="Buckets de actividad que aún no se han podido enviar, por ejemplo por falta de conexión. Se envían solos en cuanto vuelve la conexión.">i</span>
+          </span>
           <span id="sync-pending" class="muted">0</span>
         </div>
         <div class="row">
-          <span>Modo de captura</span>
+          <span class="row-label">
+            Modo de captura
+            <span class="info-dot" tabindex="0" title="'Completo' cuenta pulsaciones y clics además del tiempo activo. 'Limitado' solo registra tiempo, cuando el sistema no permite lo demás.">i</span>
+          </span>
           <span id="capture-mode" class="muted">—</span>
         </div>
         <div class="row">
-          <span>Iniciar con Windows</span>
+          <span class="row-label">
+            Iniciar con Windows
+            <span class="info-dot" tabindex="0" title="Si está activado, el agente arranca solo (minimizado) cuando enciendes el equipo.">i</span>
+          </span>
           <label class="switch">
             <input id="autostart" type="checkbox" />
             <span class="slider"></span>
@@ -95,13 +123,56 @@
         </div>
       </div>
 
-      <div class="actions">
-        <button id="sync" class="ghost" type="button">Sincronizar ahora</button>
-        <button id="minimize" class="ghost" type="button">Minimizar</button>
-      </div>
-
       <p class="muted small center" id="server-label">—</p>
+      <p class="muted small center version-line">Itappi Tracking Agent v2</p>
     </section>
+
+    <!-- Info modal -->
+    <div id="info-overlay" class="modal-overlay" hidden>
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="info-title">
+        <div class="modal-head">
+          <h2 id="info-title">Cómo funciona el agente</h2>
+          <button id="info-close" class="icon-btn" type="button" aria-label="Cerrar">×</button>
+        </div>
+
+        <div class="modal-body">
+          <section>
+            <h3>Cómo se calcula tu % de actividad</h3>
+            <p>
+              En el minuto en curso, tu actividad combina tres señales con
+              distinto peso: <strong>50% teclado</strong> (pulsaciones),
+              <strong>25% clics</strong> del ratón y <strong>25%
+              movimiento</strong> del ratón (distancia recorrida). Si el
+              sistema no permite capturar teclas/clics/movimiento (modo
+              "limitado"), se usa en su lugar el % del minuto en que hubo
+              cualquier actividad, según el reloj de inactividad de Windows.
+            </p>
+          </section>
+
+          <section>
+            <h3>Qué es un "bucket"</h3>
+            <p>
+              Tu tiempo se confirma en bloques fijos de 15 minutos. Si
+              estuviste activo durante ese bloque, se marca como
+              <strong>"Bucket enviado"</strong> y arranca uno nuevo. Si no
+              hubo actividad en esos 15 minutos, el conteo queda en
+              <strong>"Bucket pausado"</strong> hasta que vuelvas a moverte —
+              no se pierde nada, solo espera a que estés de vuelta.
+            </p>
+          </section>
+
+          <section>
+            <h3>Qué NO registra este agente</h3>
+            <p>
+              No graba qué teclas pulsás, ni el texto que escribís, ni
+              capturas de pantalla, ni qué aplicaciones o páginas usás. Solo
+              cuenta pulsaciones, clics y distancia del mouse por minuto, y el
+              tiempo trabajado.
+            </p>
+          </section>
+        </div>
+      </div>
+    </div>
 
     <script src="app.js"></script>
   </body>

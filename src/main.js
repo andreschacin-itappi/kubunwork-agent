@@ -1,15 +1,27 @@
 const path = require("path");
+const { spawn } = require("child_process");
 const { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage, powerMonitor, safeStorage, shell } = require("electron");
 
 const { Store } = require("./lib/store");
 const { Api, ApiError } = require("./lib/api");
 const { Tracker } = require("./lib/tracker");
 const { Syncer } = require("./lib/sync");
+const { Updater } = require("./lib/updater");
+
+// No dialog, no employee-facing prompt — silent by design (see
+// HISTORIAL-CLAUDE.md 2026-08-10). A staged update only gets applied once the
+// tracker is idle or stopped, so it never interrupts an active minute.
+const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const UPDATE_FIRST_CHECK_DELAY_MS = 30 * 1000;
+
+// Keeps the server's view of "app open / paused / idle" fresh — see
+// agent-presence.ts. Runs unconditionally (not just for packaged builds).
+const PING_INTERVAL_MS = 30 * 1000;
 
 /** Mirrors the server's fallback block in config.routes.ts, so a first run with
  *  no network still measures with the same parameters the server would send. */
 const DEFAULT_CONFIG = {
-  idleThresholdMinutes: 5,
+  idleThresholdMinutes: 15,
   syncIntervalSeconds: 90,
   bucketDurationSeconds: 60,
   offlineRetentionDays: 7,
@@ -22,6 +34,8 @@ let store;
 let api;
 let tracker;
 let syncer;
+let updater;
+let updateApplyInFlight = false;
 let win = null;
 let tray = null;
 let config = { ...DEFAULT_CONFIG };
@@ -46,7 +60,7 @@ function iconPath() {
 async function bootstrap() {
   store = new Store(app.getPath("userData"), safeStorage);
   api = new Api();
-  api.configure({ baseUrl: store.get("serverUrl"), token: store.getToken() });
+  api.configure({ baseUrl: store.get("serverUrl"), token: store.getToken(), version: app.getVersion() });
 
   if (store.get("config")) config = { ...DEFAULT_CONFIG, ...store.get("config") };
 
@@ -56,21 +70,77 @@ async function bootstrap() {
 
   syncer = new Syncer({ api, store, tracker, getConfig: () => config });
 
+  updater = new Updater({
+    getBaseUrl: () => api.baseUrl,
+    currentVersion: app.getVersion(),
+    stagingDir: path.join(app.getPath("userData"), "update-staging"),
+  });
+
   wireEvents();
   createWindow();
   createTray();
 
   if (api.token) {
-    // Resume where the previous run left off before the employee touches
-    // anything — a reboot mid-shift should not silently stop tracking.
+    // Deliberately does NOT auto-resume tracking (even if it was running
+    // before the app closed) — the employee decided that "Iniciar" should be
+    // an explicit, physical click every time the agent starts, whatever the
+    // reason (Windows boot, a manual relaunch, an auto-update). Syncing still
+    // resumes on its own so any queued buckets from before still go out.
     refreshConfig();
     syncer.start();
-    if (store.get("timerRunning")) tracker.start();
+    pingServer();
+  }
+  setInterval(pingServer, PING_INTERVAL_MS);
+
+  if (app.isPackaged) {
+    setTimeout(() => checkForAgentUpdate(), UPDATE_FIRST_CHECK_DELAY_MS);
+    setInterval(() => checkForAgentUpdate(), UPDATE_CHECK_INTERVAL_MS);
   }
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
+}
+
+/** Best-effort — a missed ping just means the server treats this employee as
+ *  offline for up to ~PAUSE/OFFLINE thresholds longer than reality. */
+function pingServer() {
+  if (!api.token) return;
+  api.me({ isIdle: tracker.isIdle, running: tracker.running }).catch(() => {});
+}
+
+/** Silent — a failed check/download just gets retried on the next interval,
+ *  same resilience posture as the activity syncer. */
+async function checkForAgentUpdate() {
+  try {
+    const manifest = await updater.check();
+    if (!manifest) return;
+    await updater.stage(manifest);
+    console.log(`[updater] versión ${manifest.version} descargada y verificada, esperando un momento sin actividad`);
+  } catch (err) {
+    console.warn("[updater] chequeo o descarga falló:", err.message);
+  }
+}
+
+/** Only called once a staged update exists and the tracker is idle/stopped
+ *  (see the "tick" handler in wireEvents). Hands off the actual file swap to
+ *  a detached helper — see updater-helper.js for why it can't happen here. */
+function applyStagedUpdateAndRestart() {
+  if (!updater.staged || updateApplyInFlight) return;
+  updateApplyInFlight = true;
+
+  const appDir = path.join(process.resourcesPath, "app");
+  const helperPath = path.join(__dirname, "updater-helper.js");
+
+  spawn(process.execPath, [helperPath, String(process.pid), appDir, updater.staged.appDir, process.execPath], {
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+    detached: true,
+    stdio: "ignore",
+  }).unref();
+
+  // Tracking never auto-resumes after any relaunch (see bootstrap) — quitApp()
+  // already flushes and quits cleanly, so the update just reuses it.
+  quitApp();
 }
 
 function wireEvents() {
@@ -90,6 +160,12 @@ function wireEvents() {
       store.save();
     }
     pushState();
+
+    // A staged update waits for a moment with nothing to interrupt: either
+    // the tracker is idle, or the employee isn't tracking at all right now.
+    if (app.isPackaged && updater?.staged && !updateApplyInFlight && (!tracker.running || tracker.isIdle)) {
+      applyStagedUpdateAndRestart();
+    }
   });
 
   tracker.on("state", () => {
@@ -126,26 +202,19 @@ function wireEvents() {
 
   // Sleep/resume: the OS idle clock jumps, and a bucket boundary may be hours
   // in the past. Flushing on suspend keeps the pre-sleep minute honest.
+  // Waking back up does NOT restart tracking on its own — same "Iniciar" has
+  // to be an explicit click every time, whether that's after a reboot, an
+  // update, or the laptop coming back from sleep.
   powerMonitor.on("suspend", () => {
-    if (tracker.running) {
-      tracker.stop();
-      store.set("resumeAfterWake", true);
-    }
+    tracker.stop();
     syncer.syncNow().catch(() => {});
-  });
-
-  powerMonitor.on("resume", () => {
-    if (store.get("resumeAfterWake")) {
-      store.set("resumeAfterWake", false);
-      if (api.token) tracker.start();
-    }
   });
 }
 
 function createWindow() {
   win = new BrowserWindow({
     width: 420,
-    height: 660,
+    height: 740,
     resizable: false,
     maximizable: false,
     fullscreenable: false,
@@ -274,7 +343,10 @@ function buildState() {
       inFlight: syncer.inFlight,
     },
     config,
-    autoStart: app.getLoginItemSettings().openAtLogin,
+    // Must pass the same args used in agent:set-autostart below — Electron on
+    // Windows compares path+args against the registry Run key, so reading it
+    // back without --hidden reports openAtLogin as false even when it's on.
+    autoStart: app.getLoginItemSettings({ args: ["--hidden"] }).openAtLogin,
   };
 }
 
@@ -320,7 +392,10 @@ ipcMain.handle("agent:login", async (_event, { serverUrl, email, password }) => 
     await refreshConfig();
     syncer.start();
     tracker.restoreDay(store.get("day"));
-    tracker.start();
+    // Deliberately not starting the tracker here — see the same note in
+    // bootstrap(). The employee presses "Iniciar" themselves.
+    pingServer();
+    if (app.isPackaged) setTimeout(() => checkForAgentUpdate(), UPDATE_FIRST_CHECK_DELAY_MS);
 
     pushState();
     updateTray();

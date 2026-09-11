@@ -16,7 +16,7 @@ import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
 const { activityPct, activityPctFromSeconds } = require("../src/lib/metrics.js");
-const { Tracker } = require("../src/lib/tracker.js");
+const { Tracker, localDateString } = require("../src/lib/tracker.js");
 const { Syncer } = require("../src/lib/sync.js");
 const { Store } = require("../src/lib/store.js");
 
@@ -48,6 +48,13 @@ function makeTracker({ config = CONFIG, startAt = Date.UTC(2026, 7, 7, 12, 0, 0)
     getConfig: () => config,
   });
 
+  // The constructor seeds `day.date` via `localDateString()`'s default `new
+  // Date()`, which reads the real wall clock (Date.now() above doesn't affect
+  // a bare `new Date()`). Left uncorrected, that real "today" disagrees with
+  // the mocked `now` used everywhere else and fires a bogus day-rollover on
+  // the tracker's very first tick. Re-seed it from the mocked time instead.
+  tracker.day = { date: localDateString(new Date(now)), trackedSeconds: 0, idleSubtracted: 0 };
+
   const buckets = [];
   tracker.on("bucket", (record) => buckets.push(record));
 
@@ -58,7 +65,12 @@ function makeTracker({ config = CONFIG, startAt = Date.UTC(2026, 7, 7, 12, 0, 0)
   const capturingStart = () => {
     global.setInterval = (fn) => {
       tickFn = fn;
-      return 0;
+      // Must be truthy: the tracker's own `if (this.tickTimer) return;` guard
+      // uses this to skip re-arming on a second start() (e.g. resume after a
+      // manual pause). A falsy id like 0 would defeat that guard and — once
+      // this stub is restored to the real setInterval right after — let a
+      // resume leak an actual, never-cleared 1s interval into the process.
+      return { fake: true };
     };
     try {
       tracker.start();
@@ -179,6 +191,59 @@ test("a paused timer records nothing", () => {
   h.restore();
 });
 
+test("the default idle threshold is 15 minutes when config omits it", () => {
+  const h = makeTracker({ config: {} }); // no idleThresholdMinutes at all
+  h.start();
+  h.advance(400);
+
+  // 5 minutes idle used to be enough to trigger a giveback; it must not
+  // anymore now that the default threshold is 15 minutes.
+  h.setIdle(300);
+  h.advance(1);
+  let snap = h.tracker.snapshot();
+  assert.equal(snap.idleSubtracted, 0, "5 minutes idle must not trigger the old 5-minute default");
+  assert.equal(snap.trackedSeconds, 401);
+
+  h.setIdle(900); // 15 minutes
+  h.advance(1);
+  snap = h.tracker.snapshot();
+  assert.ok(snap.idleSubtracted > 0, "15 minutes idle does cross the new default threshold");
+  h.restore();
+});
+
+test("resume after a pause still reconciles idle time that was ramping up before it", () => {
+  // Regression test for the resume-after-pause bug: pausing right before the
+  // idle threshold was naturally going to be crossed used to freeze the idle
+  // machinery, so the ramp-up window stayed wrongly banked as worked time
+  // forever, even once the employee had clearly been away well past the
+  // threshold — because resuming never re-checked it.
+  const h = makeTracker(); // 5-minute (300s) threshold
+  h.start();
+  h.advance(60); // 60s of real work
+  h.setIdle(299); // one second short of the threshold — not yet given back
+  h.advance(50);
+  assert.equal(h.tracker.snapshot().trackedSeconds, 110, "the ramp-up window is still banked, pre-pause");
+
+  h.tracker.stop();
+  assert.equal(h.tracker.snapshot().trackedSeconds, 110, "pausing alone must not lose or fix anything yet");
+
+  // While paused, the employee never comes back — idle climbs well past the
+  // threshold. The bug: this used to go unnoticed until running again.
+  h.setIdle(900);
+  h.advance(200);
+  let snap = h.tracker.snapshot();
+  assert.equal(snap.trackedSeconds, 0, "idle crossing the threshold is caught even while paused");
+  assert.equal(snap.idleSubtracted, 110, "the whole banked ramp-up window is given back");
+
+  // The employee returns and resumes — that click is itself real input.
+  h.setIdle(0);
+  h.tracker.start();
+  h.advance(5);
+  snap = h.tracker.snapshot();
+  assert.equal(snap.trackedSeconds, 5, "counting resumes cleanly with nothing stale left over");
+  h.restore();
+});
+
 // --- buckets ---------------------------------------------------------------
 
 test("buckets close on aligned minute boundaries and satisfy the server schema", () => {
@@ -218,6 +283,23 @@ test("a bucket with no input at all is flagged idle", () => {
   assert.ok(idleBuckets.length >= 1);
   assert.equal(idleBuckets[0].active_seconds, 0);
   assert.equal(idleBuckets[0].activity_pct, 0);
+  h.restore();
+});
+
+test("any activity in a bucket credits the whole minute, not just the active seconds", () => {
+  const h = makeTracker();
+  h.start();
+
+  // A single second of real input, then silence for the rest of the minute —
+  // low, minimal activity that must still count as a full minute worked.
+  h.setIdle(0);
+  h.advance(1);
+  h.setIdle(5);
+  h.advance(59);
+
+  assert.equal(h.buckets.length, 1);
+  assert.equal(h.buckets[0].is_idle, false);
+  assert.equal(h.buckets[0].active_seconds, 60, "one second of input still credits the full minute");
   h.restore();
 });
 

@@ -10,13 +10,14 @@
  * needed. Run: npm run package:win
  */
 import { createWriteStream } from "node:fs";
-import { mkdir, rm, cp, readFile, writeFile, rename, stat, readdir } from "node:fs/promises";
+import { mkdir, rm, readFile, writeFile, rename, stat } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { pipeline } from "node:stream/promises";
 import { Readable } from "node:stream";
-import { dirname, join, sep } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { stageAppResources } from "./lib/stage-app.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const cacheDir = join(root, "build", ".cache");
@@ -110,59 +111,8 @@ await rm(join(appDir, "resources", "default_app.asar"), { force: true });
 
 log("Copiando la aplicación…");
 const appResources = join(appDir, "resources", "app");
-await mkdir(appResources, { recursive: true });
-
-for (const entry of ["src", "ui", "assets"]) {
-  await cp(join(root, entry), join(appResources, entry), { recursive: true });
-}
-
-// The shipped manifest keeps only what Electron reads at runtime. Build-time
-// tooling (resedit, electron itself) has no business inside the app.
-await writeFile(
-  join(appResources, "package.json"),
-  JSON.stringify(
-    {
-      name: pkg.name,
-      productName: pkg.productName,
-      version: pkg.version,
-      description: pkg.description,
-      main: pkg.main,
-      dependencies: pkg.dependencies,
-    },
-    null,
-    2
-  ),
-  "utf8"
-);
-
-// Copy only production dependencies, resolved through npm rather than a
-// hand-kept list, so a new transitive dep can't be silently left behind.
-log("Resolviendo dependencias de producción…");
-const listed = execFileSync("npm", ["ls", "--omit=dev", "--all", "--parseable"], {
-  cwd: root,
-  encoding: "utf8",
-})
-  .split("\n")
-  .map((line) => line.trim())
-  .filter((line) => line.includes(`${sep}node_modules${sep}`));
-
-if (listed.length === 0) throw new Error("npm ls no devolvió dependencias de producción");
-
-for (const modulePath of listed) {
-  const relative = modulePath.slice(modulePath.indexOf(`${sep}node_modules${sep}`) + 1);
-  await cp(modulePath, join(appResources, relative), { recursive: true });
-}
-log(`${listed.length} paquete(s) de producción incluidos`);
-const prebuilds = join(appResources, "node_modules", "uiohook-napi", "prebuilds");
-if (await exists(prebuilds)) {
-  for (const platform of await readdir(prebuilds)) {
-    if (platform !== "win32-x64") await rm(join(prebuilds, platform), { recursive: true, force: true });
-  }
-  if (!(await exists(join(prebuilds, "win32-x64")))) {
-    throw new Error("Falta el binario nativo win32-x64 de uiohook-napi");
-  }
-  log("Binario nativo win32-x64 incluido (captura de teclado/ratón)");
-}
+const { depCount } = await stageAppResources(root, appResources, "win32-x64");
+log(`${depCount} paquete(s) de producción incluidos (binario nativo win32-x64 de uiohook-napi entre ellos)`);
 
 // --- 3. brand the executable ----------------------------------------------
 

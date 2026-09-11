@@ -28,7 +28,7 @@ function localDateString(date = new Date()) {
 }
 
 function emptyCounts() {
-  return { keystrokes: 0, mouseClicks: 0, mouseMoves: 0, mouseDistance: 0, activeSeconds: 0 };
+  return { keystrokes: 0, mouseClicks: 0, mouseMoves: 0, mouseDistance: 0, activeSeconds: 0, elapsedSeconds: 0 };
 }
 
 class Tracker extends EventEmitter {
@@ -127,7 +127,10 @@ class Tracker extends EventEmitter {
     // lose the work done since the last boundary.
     this.#flushBucket({ partial: true });
     this.running = false;
-    this.inIdle = false;
+    // inIdle is deliberately left as-is: it tracks real OS inactivity, which
+    // keeps being evaluated every tick below even while paused (see #tick).
+    // Resetting it here used to let a pause hide an in-progress idle ramp-up
+    // from ever being given back once resumed — see the resume-after-pause fix.
     this.emit("state");
   }
 
@@ -181,26 +184,40 @@ class Tracker extends EventEmitter {
     }
 
     this.idleSeconds = this.#systemIdleSeconds();
-    const idleThreshold = Math.max(60, (this.getConfig().idleThresholdMinutes || 5) * 60);
+    const idleThreshold = Math.max(60, (this.getConfig().idleThresholdMinutes || 15) * 60);
+
+    // Idle transitions are tracked unconditionally, paused or not. A manual
+    // pause must not blind the system to inactivity that was already ramping
+    // up before it: if it did, that ramp-up window stayed "banked" as worked
+    // time forever, since resuming later never re-checked it (the resume-
+    // after-pause bug). Only the *accumulation* of tracked seconds below is
+    // gated on `running` — going idle or leaving idle is evaluated every tick.
+    if (this.idleSeconds >= idleThreshold) {
+      if (!this.inIdle) {
+        // The threshold window was counted as worked before we knew it was
+        // idle. Give it back once, on entry, and let the server lower its
+        // stored total by the same amount via idle_subtracted_seconds.
+        this.inIdle = true;
+        const giveBack = Math.min(this.day.trackedSeconds, idleThreshold);
+        this.day.trackedSeconds -= giveBack;
+        this.day.idleSubtracted += giveBack;
+        this.emit("idle-entered", giveBack);
+      }
+    } else if (this.inIdle) {
+      this.inIdle = false;
+      this.emit("idle-left");
+    }
 
     if (this.running) {
-      if (this.idleSeconds >= idleThreshold) {
-        if (!this.inIdle) {
-          // The threshold window was counted as worked before we knew it was
-          // idle. Give it back once, on entry, and let the server lower its
-          // stored total by the same amount via idle_subtracted_seconds.
-          this.inIdle = true;
-          const giveBack = Math.min(this.day.trackedSeconds, idleThreshold);
-          this.day.trackedSeconds -= giveBack;
-          this.day.idleSubtracted += giveBack;
-          this.emit("idle-entered", giveBack);
-        }
-      } else {
-        if (this.inIdle) {
-          this.inIdle = false;
-          this.emit("idle-left");
-        }
+      if (!this.inIdle) {
         this.day.trackedSeconds += 1;
+      }
+
+      // Real seconds this bucket has been open while tracking, regardless of
+      // activity — used to size a partial bucket (pause/rollover/sleep) fairly
+      // when the bucket turns out to have had any input at all.
+      if (this.counts.elapsedSeconds < MAX_ACTIVE_SECONDS) {
+        this.counts.elapsedSeconds += 1;
       }
 
       // A second with input anywhere on the machine counts as active. This is
@@ -250,7 +267,10 @@ class Tracker extends EventEmitter {
       mouse_distance: Math.round(counts.mouseDistance),
       activity_pct: pct,
       is_idle: !hadInput,
-      active_seconds: Math.min(MAX_ACTIVE_SECONDS, counts.activeSeconds),
+      // Any activity at all in the bucket credits the whole elapsed minute as
+      // worked (not just the seconds that happened to have input); a bucket
+      // with zero input credits nothing. No proportional partial credit.
+      active_seconds: hadInput ? Math.min(MAX_ACTIVE_SECONDS, counts.elapsedSeconds) : 0,
       capture_mode: this.captureMode,
     };
 
