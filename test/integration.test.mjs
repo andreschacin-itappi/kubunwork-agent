@@ -449,6 +449,63 @@ test("the session survives a restart of the agent", async () => {
   }
 });
 
+test("a manual pause survives an abrupt power loss and resumes from the same total", async () => {
+  // The exact reported scenario: start, work, pause manually (e.g. for
+  // lunch), the machine loses power right there with no graceful shutdown,
+  // and reopening must keep the pre-pause total intact and keep adding to it
+  // — never reset, never subtract.
+  const backend = await startFakeBackend();
+  const first = await bootAgent();
+  let userData;
+  let beforePause;
+  try {
+    await first.invoke("agent:login", {
+      serverUrl: backend.url,
+      email: "ana@empresa.com",
+      password: "correcta",
+    });
+    await first.invoke("agent:start");
+    userData = first.userData;
+    // Short and immediately followed by the power cut on purpose: long enough
+    // to bank at least one real second, but well under the old periodic-save
+    // window, so this only passes if the pause itself forces an immediate
+    // write to disk.
+    await sleep(1200);
+    await first.invoke("agent:stop"); // manual pause, like clicking "Pausar"
+    beforePause = (await first.invoke("agent:get-state")).tracker.trackedSeconds;
+    assert.ok(beforePause >= 1, "el tiempo trabajado quedó contado antes de pausar");
+  } finally {
+    // No agent:logout, no quit IPC, nothing graceful — restore() only tears
+    // down the test harness' own timers/module hooks, standing in for the
+    // process simply dying (power outage) right after the pause.
+    first.restore();
+  }
+
+  const stub = installElectronStub({ userData, hookAvailable: true });
+  try {
+    for (const key of Object.keys(require.cache)) delete require.cache[key];
+    require("../src/main.js");
+    await stub.electron.app._ready;
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const reopened = await stub.invoke("agent:get-state");
+    assert.equal(reopened.authenticated, true);
+    assert.equal(reopened.tracker.trackedSeconds, beforePause, "el tiempo pre-pausa se conserva intacto, sin restar nada");
+    assert.equal(reopened.tracker.running, false, "sigue en pausa hasta que se pulse Iniciar de nuevo");
+
+    await stub.invoke("agent:start");
+    await sleep(1500);
+    const resumed = await stub.invoke("agent:get-state");
+    assert.ok(
+      resumed.tracker.trackedSeconds > beforePause,
+      "al reanudar, sigue sumando desde el valor conservado, no se reinicia",
+    );
+  } finally {
+    stub.restore();
+    backend.close();
+  }
+});
+
 test("an unreachable server queues locally instead of losing data", async () => {
   const backend = await startFakeBackend();
   const agent = await bootAgent();

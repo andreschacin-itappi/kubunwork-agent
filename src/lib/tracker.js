@@ -49,6 +49,11 @@ class Tracker extends EventEmitter {
     this.day = { date: localDateString(), trackedSeconds: 0, idleSubtracted: 0 };
     this.inIdle = false;
     this.idleSeconds = 0;
+    // Whether the tracker was `running` at the instant the *current* idle
+    // streak began (idleSeconds went 0 -> >0). Only a streak that started
+    // while running could have caused trackedSeconds to be over-counted, so
+    // only that case is allowed to give time back — see #tick.
+    this.idleStreakStartedRunning = false;
 
     this.tickTimer = null;
   }
@@ -183,8 +188,21 @@ class Tracker extends EventEmitter {
       this.emit("day-rollover", previous);
     }
 
+    const prevIdleSeconds = this.idleSeconds;
     this.idleSeconds = this.#systemIdleSeconds();
     const idleThreshold = Math.max(60, (this.getConfig().idleThresholdMinutes || 15) * 60);
+
+    // A fresh idle streak (OS idle clock going 0 -> >0) only risks having
+    // over-counted trackedSeconds if the tracker was actually running (and
+    // therefore accumulating) when it began. A streak that starts *after* a
+    // manual pause — the employee steps away only once already paused, e.g.
+    // to eat — never added a single second to trackedSeconds, so there is
+    // nothing to correct for it, no matter how long the pause lasts.
+    if (this.idleSeconds > 0 && prevIdleSeconds === 0) {
+      this.idleStreakStartedRunning = this.running;
+    } else if (this.idleSeconds === 0) {
+      this.idleStreakStartedRunning = false;
+    }
 
     // Idle transitions are tracked unconditionally, paused or not. A manual
     // pause must not blind the system to inactivity that was already ramping
@@ -194,13 +212,18 @@ class Tracker extends EventEmitter {
     // gated on `running` — going idle or leaving idle is evaluated every tick.
     if (this.idleSeconds >= idleThreshold) {
       if (!this.inIdle) {
-        // The threshold window was counted as worked before we knew it was
-        // idle. Give it back once, on entry, and let the server lower its
-        // stored total by the same amount via idle_subtracted_seconds.
         this.inIdle = true;
-        const giveBack = Math.min(this.day.trackedSeconds, idleThreshold);
-        this.day.trackedSeconds -= giveBack;
-        this.day.idleSubtracted += giveBack;
+        // The threshold window was counted as worked before we knew it was
+        // idle — but only if that counting was actually happening (i.e. the
+        // streak started while running). Give it back once, on entry, and
+        // let the server lower its stored total by the same amount via
+        // idle_subtracted_seconds. Never subtract real, already-banked work
+        // just because a manual pause happened to run long.
+        const giveBack = this.idleStreakStartedRunning ? Math.min(this.day.trackedSeconds, idleThreshold) : 0;
+        if (giveBack > 0) {
+          this.day.trackedSeconds -= giveBack;
+          this.day.idleSubtracted += giveBack;
+        }
         this.emit("idle-entered", giveBack);
       }
     } else if (this.inIdle) {

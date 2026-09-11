@@ -169,7 +169,12 @@ function wireEvents() {
   });
 
   tracker.on("state", () => {
-    store.set("timerRunning", tracker.running);
+    // Immediate, not debounced: a pause (or a stop on suspend) is exactly the
+    // moment a power loss right afterwards would otherwise lose up to the
+    // periodic save window's worth of already-earned trackedSeconds.
+    store.data.day = { ...tracker.day };
+    store.data.timerRunning = tracker.running;
+    store.save({ immediate: true });
     pushState();
     updateTray();
   });

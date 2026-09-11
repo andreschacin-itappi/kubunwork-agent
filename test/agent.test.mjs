@@ -244,6 +244,36 @@ test("resume after a pause still reconciles idle time that was ramping up before
   h.restore();
 });
 
+test("a long manual pause (e.g. lunch) never subtracts already-banked time", () => {
+  // Regression test for the lunch-pause bug: the employee was fully active
+  // (idle=0) right up to clicking "Pausar" — the idle streak that later
+  // crosses the threshold only starts *after* the pause, so nothing was ever
+  // mis-counted during it and nothing should be given back, no matter how
+  // long the pause lasts.
+  const h = makeTracker(); // 5-minute (300s) threshold
+  h.start();
+  h.advance(500); // 500s of real, active work
+  h.tracker.stop();
+  const beforeLunch = h.tracker.snapshot().trackedSeconds;
+  assert.equal(beforeLunch, 500);
+
+  // Idle starts climbing only now, well after the pause, and blows way past
+  // the threshold (a full lunch break).
+  h.setIdle(1800); // 30 minutes idle, all of it while paused
+  h.advance(200);
+
+  const snap = h.tracker.snapshot();
+  assert.equal(snap.trackedSeconds, beforeLunch, "the pre-pause total must stay intact");
+  assert.equal(snap.idleSubtracted, 0, "nothing was banked during the pause, so nothing is taken back");
+
+  // Resuming continues from exactly where it left off.
+  h.setIdle(0);
+  h.tracker.start();
+  h.advance(10);
+  assert.equal(h.tracker.snapshot().trackedSeconds, beforeLunch + 10);
+  h.restore();
+});
+
 // --- buckets ---------------------------------------------------------------
 
 test("buckets close on aligned minute boundaries and satisfy the server schema", () => {
