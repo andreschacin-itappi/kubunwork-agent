@@ -118,6 +118,8 @@ if (typeof document !== "undefined") {
     autostart: $("autostart"),
     logout: $("logout"),
     serverLabel: $("server-label"),
+    versionLabel: $("version-label"),
+    versionTag: $("version-tag"),
   };
 
   let bucketState = initialBucketState();
@@ -166,6 +168,14 @@ if (typeof document !== "undefined") {
 
   const render = (state) => {
     if (!state) return;
+
+    // Shown on both screens so it's always visible: lets an employee (or
+    // support) confirm at a glance which build is actually running, instead
+    // of trusting that a silent auto-update already landed.
+    if (state.version) {
+      el.versionTag.textContent = `v${state.version}`;
+      el.versionLabel.textContent = `v${state.version}`;
+    }
 
     if (!state.authenticated) {
       el.viewLogin.hidden = false;
