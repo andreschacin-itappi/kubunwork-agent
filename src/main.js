@@ -41,6 +41,16 @@ let tray = null;
 let config = { ...DEFAULT_CONFIG };
 let quitting = false;
 let ticksSinceSave = 0;
+let lastUpdateCheckAt = 0;
+
+// Closing the window only hides it to the tray (tracking must survive), so
+// the vast majority of employees "closing and reopening" the app never
+// actually restarts the process that owns the 30s-after-boot / 6h update
+// check — it just keeps running in the background, possibly for days, on
+// whatever schedule it started with. Re-checking on every real window open
+// too (throttled so clicking the tray icon repeatedly can't spam the
+// server) makes that expected gesture actually do something.
+const REOPEN_UPDATE_CHECK_MIN_INTERVAL_MS = 5 * 60 * 1000;
 
 const startedHidden = process.argv.includes("--hidden");
 
@@ -112,6 +122,7 @@ function pingServer() {
 /** Silent — a failed check/download just gets retried on the next interval,
  *  same resilience posture as the activity syncer. */
 async function checkForAgentUpdate() {
+  lastUpdateCheckAt = Date.now();
   try {
     const manifest = await updater.check();
     if (!manifest) return;
@@ -263,6 +274,12 @@ function showWindow() {
   if (win.isMinimized()) win.restore();
   win.show();
   win.focus();
+
+  // See REOPEN_UPDATE_CHECK_MIN_INTERVAL_MS above — this is what makes
+  // "close the window, open it again" actually check for an update.
+  if (app.isPackaged && Date.now() - lastUpdateCheckAt >= REOPEN_UPDATE_CHECK_MIN_INTERVAL_MS) {
+    checkForAgentUpdate();
+  }
 }
 
 function createTray() {
