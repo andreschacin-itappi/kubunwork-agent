@@ -46,14 +46,15 @@ class Tracker extends EventEmitter {
     this.bucketStart = null;
     this.lastMouse = null;
 
-    this.day = { date: localDateString(), trackedSeconds: 0, idleSubtracted: 0 };
+    this.day = { date: localDateString(), trackedSeconds: 0 };
     this.inIdle = false;
     this.idleSeconds = 0;
-    // Whether the tracker was `running` at the instant the *current* idle
-    // streak began (idleSeconds went 0 -> >0). Only a streak that started
-    // while running could have caused trackedSeconds to be over-counted, so
-    // only that case is allowed to give time back — see #tick.
-    this.idleStreakStartedRunning = false;
+    // Seconds elapsed since the last confirmed-active second, held here
+    // instead of trackedSeconds until they are resolved one way or the
+    // other: credited in full the moment new input arrives (a short pause,
+    // not real inactivity), or simply abandoned — never subtracted — once
+    // idleSeconds confirms 15 real minutes of nothing. See #tick.
+    this.unconfirmedSeconds = 0;
 
     this.tickTimer = null;
   }
@@ -66,10 +67,9 @@ class Tracker extends EventEmitter {
       this.day = {
         date: day.date,
         trackedSeconds: Math.max(0, day.trackedSeconds || 0),
-        idleSubtracted: Math.max(0, day.idleSubtracted || 0),
       };
     } else {
-      this.day = { date: localDateString(), trackedSeconds: 0, idleSubtracted: 0 };
+      this.day = { date: localDateString(), trackedSeconds: 0 };
     }
   }
 
@@ -184,56 +184,45 @@ class Tracker extends EventEmitter {
     if (today !== this.day.date) {
       this.#flushBucket({ partial: true });
       const previous = { ...this.day };
-      this.day = { date: today, trackedSeconds: 0, idleSubtracted: 0 };
+      this.day = { date: today, trackedSeconds: 0 };
+      this.unconfirmedSeconds = 0;
       this.emit("day-rollover", previous);
     }
 
-    const prevIdleSeconds = this.idleSeconds;
     this.idleSeconds = this.#systemIdleSeconds();
     const idleThreshold = Math.max(60, (this.getConfig().idleThresholdMinutes || 15) * 60);
 
-    // A fresh idle streak (OS idle clock going 0 -> >0) only risks having
-    // over-counted trackedSeconds if the tracker was actually running (and
-    // therefore accumulating) when it began. A streak that starts *after* a
-    // manual pause — the employee steps away only once already paused, e.g.
-    // to eat — never added a single second to trackedSeconds, so there is
-    // nothing to correct for it, no matter how long the pause lasts.
-    if (this.idleSeconds > 0 && prevIdleSeconds === 0) {
-      this.idleStreakStartedRunning = this.running;
-    } else if (this.idleSeconds === 0) {
-      this.idleStreakStartedRunning = false;
-    }
-
-    // Idle transitions are tracked unconditionally, paused or not. A manual
-    // pause must not blind the system to inactivity that was already ramping
-    // up before it: if it did, that ramp-up window stayed "banked" as worked
-    // time forever, since resuming later never re-checked it (the resume-
-    // after-pause bug). Only the *accumulation* of tracked seconds below is
-    // gated on `running` — going idle or leaving idle is evaluated every tick.
-    if (this.idleSeconds >= idleThreshold) {
-      if (!this.inIdle) {
-        this.inIdle = true;
-        // The threshold window was counted as worked before we knew it was
-        // idle — but only if that counting was actually happening (i.e. the
-        // streak started while running). Give it back once, on entry, and
-        // let the server lower its stored total by the same amount via
-        // idle_subtracted_seconds. Never subtract real, already-banked work
-        // just because a manual pause happened to run long.
-        const giveBack = this.idleStreakStartedRunning ? Math.min(this.day.trackedSeconds, idleThreshold) : 0;
-        if (giveBack > 0) {
-          this.day.trackedSeconds -= giveBack;
-          this.day.idleSubtracted += giveBack;
-        }
-        this.emit("idle-entered", giveBack);
-      }
-    } else if (this.inIdle) {
-      this.inIdle = false;
+    // Idle transitions are tracked unconditionally, paused or not — running
+    // only gates whether seconds accumulate below, not whether the OS idle
+    // clock is watched.
+    const wasIdle = this.inIdle;
+    this.inIdle = this.idleSeconds >= idleThreshold;
+    if (this.inIdle && !wasIdle) {
+      // 15 real minutes of nothing, confirmed: whatever was held in the
+      // grace-window buffer was never credited to trackedSeconds in the
+      // first place, so there is nothing to subtract — just stop holding it.
+      this.unconfirmedSeconds = 0;
+      this.emit("idle-entered");
+    } else if (!this.inIdle && wasIdle) {
       this.emit("idle-left");
     }
 
     if (this.running) {
-      if (!this.inIdle) {
-        this.day.trackedSeconds += 1;
+      if (this.idleSeconds === 0) {
+        // Input happened this very second, so the gap since the last
+        // confirmed-active second was a short pause, not real inactivity —
+        // credit it in full, plus this second. This can only ever move
+        // trackedSeconds forward, never back: a pause under the threshold
+        // costs nothing, and one that crosses it (handled above) simply
+        // never got added rather than being added then clawed back.
+        this.day.trackedSeconds += this.unconfirmedSeconds + 1;
+        this.unconfirmedSeconds = 0;
+      } else if (!this.inIdle) {
+        // Still within the grace window and not yet resolved either way:
+        // hold this second uncommitted instead of adding it, exactly like a
+        // bucket credits its full minute only once *any* input in it shows
+        // up — see #flushBucket's `hadInput`.
+        this.unconfirmedSeconds += 1;
       }
 
       // Real seconds this bucket has been open while tracking, regardless of
@@ -319,7 +308,6 @@ class Tracker extends EventEmitter {
       running: this.running,
       captureMode: this.captureMode,
       trackedSeconds: this.day.trackedSeconds,
-      idleSubtracted: this.day.idleSubtracted,
       date: this.day.date,
       isIdle: this.inIdle,
       idleSeconds: this.idleSeconds,

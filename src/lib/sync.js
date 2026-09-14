@@ -63,7 +63,6 @@ class Syncer extends EventEmitter {
       const res = await this.api.postActivity({
         records: batch,
         trackedSeconds: snap.trackedSeconds,
-        idleSubtractedSeconds: snap.idleSubtracted,
       });
 
       // Accepted (201) or partially accepted (207). Either way these records

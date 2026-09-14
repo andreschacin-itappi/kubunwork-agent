@@ -3,7 +3,8 @@
  *
  * The UI and the global input hook need a real desktop, but everything that
  * decides what number reaches the server is pure and testable here:
- * scoring, idle subtraction, bucket shape, day rollover, queue draining.
+ * scoring, idle handling (never subtracts, only stops counting), bucket
+ * shape, day rollover, queue draining.
  *
  * Run: node --test test/
  */
@@ -53,7 +54,7 @@ function makeTracker({ config = CONFIG, startAt = Date.UTC(2026, 7, 7, 12, 0, 0)
   // a bare `new Date()`). Left uncorrected, that real "today" disagrees with
   // the mocked `now` used everywhere else and fires a bogus day-rollover on
   // the tracker's very first tick. Re-seed it from the mocked time instead.
-  tracker.day = { date: localDateString(new Date(now)), trackedSeconds: 0, idleSubtracted: 0 };
+  tracker.day = { date: localDateString(new Date(now)), trackedSeconds: 0 };
 
   const buckets = [];
   tracker.on("bucket", (record) => buckets.push(record));
@@ -139,7 +140,7 @@ test("timer counts one second per tick while the user is active", () => {
   h.restore();
 });
 
-test("crossing the idle threshold gives back the idle window exactly once", () => {
+test("crossing the idle threshold stops counting, but never subtracts what was already banked", () => {
   const h = makeTracker();
   h.start();
 
@@ -150,34 +151,39 @@ test("crossing the idle threshold gives back the idle window exactly once", () =
   h.advance(1);
 
   let snap = h.tracker.snapshot();
-  assert.equal(snap.trackedSeconds, 100, "the 300s idle window is subtracted");
-  assert.equal(snap.idleSubtracted, 300);
+  assert.equal(snap.trackedSeconds, 400, "confirmed idle must not subtract the banked total");
   assert.equal(snap.isIdle, true);
 
-  // Staying idle must not subtract again, nor keep counting.
+  // Staying idle must not keep counting either.
   h.setIdle(600);
   h.advance(120);
   snap = h.tracker.snapshot();
-  assert.equal(snap.trackedSeconds, 100, "no further time counted while idle");
-  assert.equal(snap.idleSubtracted, 300, "no double subtraction");
+  assert.equal(snap.trackedSeconds, 400, "no further time counted while idle");
 
-  // Coming back resumes counting.
+  // Coming back resumes counting from exactly where it left off.
   h.setIdle(0);
   h.advance(10);
-  assert.equal(h.tracker.snapshot().trackedSeconds, 110);
+  assert.equal(h.tracker.snapshot().trackedSeconds, 410);
   h.restore();
 });
 
-test("the timer never goes negative when idle starts early in the day", () => {
-  const h = makeTracker();
+test("a pause under the threshold is credited in full once activity resumes", () => {
+  const h = makeTracker(); // 5-minute (300s) threshold
   h.start();
-  h.advance(60); // only 60s banked, less than the 300s threshold
-  h.setIdle(300);
-  h.advance(1);
+  h.advance(60); // 60s banked
+  h.setIdle(200); // well under the 300s threshold — not yet resolved either way
+  h.advance(50);
 
-  const snap = h.tracker.snapshot();
-  assert.equal(snap.trackedSeconds, 0);
-  assert.equal(snap.idleSubtracted, 60, "only what was actually banked is given back");
+  let snap = h.tracker.snapshot();
+  assert.equal(snap.trackedSeconds, 60, "the quiet stretch is held, not credited or lost, while unresolved");
+  assert.equal(snap.isIdle, false, "under the threshold is not confirmed idle");
+
+  // Activity resumes — the whole quiet stretch turns out to have been a
+  // short pause, not real inactivity, so it is credited in full.
+  h.setIdle(0);
+  h.advance(1);
+  snap = h.tracker.snapshot();
+  assert.equal(snap.trackedSeconds, 111, "60 already banked + 50 held seconds + this one, never less");
   h.restore();
 });
 
@@ -196,51 +202,51 @@ test("the default idle threshold is 15 minutes when config omits it", () => {
   h.start();
   h.advance(400);
 
-  // 5 minutes idle used to be enough to trigger a giveback; it must not
-  // anymore now that the default threshold is 15 minutes.
+  // 5 minutes idle used to be enough to confirm idle under the old default;
+  // it must not anymore now that the default threshold is 15 minutes.
   h.setIdle(300);
   h.advance(1);
   let snap = h.tracker.snapshot();
-  assert.equal(snap.idleSubtracted, 0, "5 minutes idle must not trigger the old 5-minute default");
-  assert.equal(snap.trackedSeconds, 401);
+  assert.equal(snap.isIdle, false, "5 minutes idle must not confirm idle under the new 15-minute default");
+  assert.equal(snap.trackedSeconds, 400, "still held, not yet committed nor lost");
 
   h.setIdle(900); // 15 minutes
   h.advance(1);
   snap = h.tracker.snapshot();
-  assert.ok(snap.idleSubtracted > 0, "15 minutes idle does cross the new default threshold");
+  assert.equal(snap.isIdle, true, "15 minutes idle does cross the new default threshold");
+  assert.equal(snap.trackedSeconds, 400, "confirming idle still doesn't touch the banked total");
   h.restore();
 });
 
-test("resume after a pause still reconciles idle time that was ramping up before it", () => {
-  // Regression test for the resume-after-pause bug: pausing right before the
-  // idle threshold was naturally going to be crossed used to freeze the idle
-  // machinery, so the ramp-up window stayed wrongly banked as worked time
-  // forever, even once the employee had clearly been away well past the
-  // threshold — because resuming never re-checked it.
+test("an idle ramp-up that begins while still running is held, not eagerly counted — nothing is ever taken back", () => {
+  // Regression coverage for the resume-after-pause bug from the employee's
+  // point of view: whether the quiet stretch started before or after a
+  // manual pause must not matter, because neither one is ever added to
+  // trackedSeconds speculatively in the first place — see the sibling test
+  // below for the "starts after the pause" half of this guarantee.
   const h = makeTracker(); // 5-minute (300s) threshold
   h.start();
-  h.advance(60); // 60s of real work
-  h.setIdle(299); // one second short of the threshold — not yet given back
-  h.advance(50);
-  assert.equal(h.tracker.snapshot().trackedSeconds, 110, "the ramp-up window is still banked, pre-pause");
+  h.advance(60); // 60s of real, active work
+  h.setIdle(299); // one second short of the threshold — still running
+  h.advance(50); // the ramp-up continues while still "running"
+  let snap = h.tracker.snapshot();
+  assert.equal(snap.trackedSeconds, 60, "the ramp-up window was never eagerly counted, so there is nothing to claw back");
 
-  h.tracker.stop();
-  assert.equal(h.tracker.snapshot().trackedSeconds, 110, "pausing alone must not lose or fix anything yet");
+  h.tracker.stop(); // the employee pauses mid-ramp-up
+  assert.equal(h.tracker.snapshot().trackedSeconds, 60, "pausing alone must not change anything");
 
-  // While paused, the employee never comes back — idle climbs well past the
-  // threshold. The bug: this used to go unnoticed until running again.
+  // Idle keeps climbing well past the threshold, now while paused.
   h.setIdle(900);
   h.advance(200);
-  let snap = h.tracker.snapshot();
-  assert.equal(snap.trackedSeconds, 0, "idle crossing the threshold is caught even while paused");
-  assert.equal(snap.idleSubtracted, 110, "the whole banked ramp-up window is given back");
+  snap = h.tracker.snapshot();
+  assert.equal(snap.trackedSeconds, 60, "confirmed idle simply stops counting — nothing was ever added to subtract");
+  assert.equal(snap.isIdle, true);
 
-  // The employee returns and resumes — that click is itself real input.
+  // The employee returns and resumes.
   h.setIdle(0);
   h.tracker.start();
   h.advance(5);
-  snap = h.tracker.snapshot();
-  assert.equal(snap.trackedSeconds, 5, "counting resumes cleanly with nothing stale left over");
+  assert.equal(h.tracker.snapshot().trackedSeconds, 65, "counting resumes cleanly from the untouched pre-idle total");
   h.restore();
 });
 
@@ -248,8 +254,8 @@ test("a long manual pause (e.g. lunch) never subtracts already-banked time", () 
   // Regression test for the lunch-pause bug: the employee was fully active
   // (idle=0) right up to clicking "Pausar" — the idle streak that later
   // crosses the threshold only starts *after* the pause, so nothing was ever
-  // mis-counted during it and nothing should be given back, no matter how
-  // long the pause lasts.
+  // held against the pre-pause total and nothing should ever be lost, no
+  // matter how long the pause lasts.
   const h = makeTracker(); // 5-minute (300s) threshold
   h.start();
   h.advance(500); // 500s of real, active work
@@ -258,13 +264,13 @@ test("a long manual pause (e.g. lunch) never subtracts already-banked time", () 
   assert.equal(beforeLunch, 500);
 
   // Idle starts climbing only now, well after the pause, and blows way past
-  // the threshold (a full lunch break).
+  // the threshold (a full lunch break) — even a power loss right here must
+  // not cost anything, since trackedSeconds is never touched while paused.
   h.setIdle(1800); // 30 minutes idle, all of it while paused
   h.advance(200);
 
   const snap = h.tracker.snapshot();
-  assert.equal(snap.trackedSeconds, beforeLunch, "the pre-pause total must stay intact");
-  assert.equal(snap.idleSubtracted, 0, "nothing was banked during the pause, so nothing is taken back");
+  assert.equal(snap.trackedSeconds, beforeLunch, "the pre-pause total must stay intact, exactly");
 
   // Resuming continues from exactly where it left off.
   h.setIdle(0);
@@ -382,7 +388,7 @@ test("local midnight resets the day counter", () => {
 
 test("restoring a stale day starts from zero", () => {
   const h = makeTracker();
-  h.tracker.restoreDay({ date: "2020-01-01", trackedSeconds: 9999, idleSubtracted: 50 });
+  h.tracker.restoreDay({ date: "2020-01-01", trackedSeconds: 9999 });
   assert.equal(h.tracker.snapshot().trackedSeconds, 0);
   h.restore();
 });
@@ -459,7 +465,7 @@ function makeSyncer({ respond }) {
     },
   };
   const tracker = {
-    snapshot: () => ({ trackedSeconds: 1234, idleSubtracted: 60 }),
+    snapshot: () => ({ trackedSeconds: 1234 }),
     adopted: null,
     adoptTrackedSeconds(value) {
       this.adopted = value;
@@ -495,7 +501,7 @@ test("the timer is sent even with an empty queue", async () => {
   assert.equal(calls.length, 1);
   assert.equal(calls[0].records.length, 0);
   assert.equal(calls[0].trackedSeconds, 1234);
-  assert.equal(calls[0].idleSubtractedSeconds, 60);
+  assert.equal(calls[0].idleSubtractedSeconds, undefined, "the idle-giveback field no longer exists");
 });
 
 test("the server's tracked total is adopted from the response", async () => {

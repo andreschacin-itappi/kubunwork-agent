@@ -24,7 +24,7 @@ class Store {
       token: null, // plaintext fallback, only when OS encryption is unavailable
       tokenEnc: null, // base64 of safeStorage-encrypted token (preferred)
       employee: null, // { id, name, department }
-      day: null, // { date, trackedSeconds, idleSubtracted }
+      day: null, // { date, trackedSeconds }
       queue: [], // activity records pending upload
       timerRunning: false,
       autoStart: false,

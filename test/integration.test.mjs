@@ -106,10 +106,9 @@ function startFakeBackend() {
         }
         state.activityCalls.push(body);
         if (body.tracked_seconds != null) {
-          state.serverTrackedSeconds = Math.max(
-            Math.max(0, state.serverTrackedSeconds - (body.idle_subtracted_seconds || 0)),
-            body.tracked_seconds
-          );
+          // Mirrors activity.service.ts: the stored total is monotonic — it
+          // can only ever grow, no matter what a client sends.
+          state.serverTrackedSeconds = Math.max(state.serverTrackedSeconds, body.tracked_seconds);
         }
         return send(201, {
           inserted: body.records.length,

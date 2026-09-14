@@ -111,16 +111,13 @@ class Api {
    * Push buckets plus the day's wall-clock timer.
    *
    * `tracked_seconds` is absolute for the employee's local day, not a delta:
-   * the server stores GREATEST(existing - idle_subtracted, tracked), so
+   * the server stores GREATEST(existing, tracked) and never lets it drop, so
    * resending the same total is idempotent and a lost batch self-heals on the
    * next sync. It returns its own total back for convergence.
    */
-  postActivity({ records, trackedSeconds, idleSubtractedSeconds }) {
+  postActivity({ records, trackedSeconds }) {
     const body = { records };
     if (trackedSeconds != null) body.tracked_seconds = Math.max(0, Math.floor(trackedSeconds));
-    if (idleSubtractedSeconds != null) {
-      body.idle_subtracted_seconds = Math.max(0, Math.floor(idleSubtractedSeconds));
-    }
     return this.#request("POST", "/api/activity", { body, timeoutMs: 30000 });
   }
 }
