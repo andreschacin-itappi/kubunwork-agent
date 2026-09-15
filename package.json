@@ -1,7 +1,7 @@
 {
   "name": "itappi-tracking-agent",
   "productName": "Itappi Tracking Agent",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "description": "Agente de escritorio que mide actividad y tiempo trabajado, y lo sincroniza con el servidor de tracking.",
   "main": "src/main.js",
   "private": true,

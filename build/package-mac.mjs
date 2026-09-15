@@ -84,6 +84,50 @@ async function buildIcns() {
   return icnsPath;
 }
 
+// --- signing ------------------------------------------------------------
+
+/**
+ * Ad-hoc-signs an app bundle from the inside out: every nested framework,
+ * helper .app and .xpc service under Contents/Frameworks first, then the
+ * top-level app itself.
+ *
+ * The official Electron zip ships those nested pieces completely unsigned
+ * (they're meant to be signed by whoever packages the app). A single
+ * `codesign --deep` pass over the whole modified bundle is what electron
+ * distributions used to rely on for that, but Apple's own codesign man page
+ * calls --deep unsuitable for production ("nested code should be signed
+ * individually") — and Apple Silicon enforces library validation strictly
+ * enough that an Electron Helper process with a stale/invalid signature gets
+ * killed the instant it's spawned. Since even a blank window needs at least
+ * one Helper (Renderer) process, the whole app then just sits there until
+ * macOS gives up and reports it "no responde" — it never gets the chance to
+ * show anything. Signing inside-out avoids relying on --deep for that.
+ */
+async function codesignInsideOut(appPath) {
+  const frameworksDir = join(appPath, "Contents", "Frameworks");
+  if (await exists(frameworksDir)) {
+    const nested = [];
+    const walk = async (dir) => {
+      for (const entry of await readdir(dir, { withFileTypes: true })) {
+        if (!entry.isDirectory()) continue;
+        const full = join(dir, entry.name);
+        if ([".app", ".framework", ".xpc"].some((ext) => entry.name.endsWith(ext))) {
+          nested.push(full);
+        }
+        await walk(full);
+      }
+    };
+    await walk(frameworksDir);
+    // Deepest first, so anything nested a level further down (e.g. a
+    // framework inside a helper .app) is signed before its container.
+    nested.sort((a, b) => b.split(sep).length - a.split(sep).length);
+    for (const item of nested) {
+      run("codesign", ["--force", "--sign", "-", item]);
+    }
+  }
+  run("codesign", ["--force", "--sign", "-", appPath]);
+}
+
 // --- build one architecture --------------------------------------------------
 
 async function buildArch(arch) {
@@ -199,8 +243,9 @@ async function buildArch(arch) {
 
   // 5. ad-hoc signature — mandatory: we modified the bundle, and Apple Silicon
   // kills apps whose signature is missing or stale. "-" = sin certificado.
-  log("Firmando (ad-hoc)…");
-  run("codesign", ["--force", "--deep", "--sign", "-", appPath]);
+  // Inside-out (helpers/frameworks first, then the app) — see codesignInsideOut.
+  log("Firmando (ad-hoc, de adentro hacia afuera)…");
+  await codesignInsideOut(appPath);
 
   // 6. LEEME + .dmg
   await writeFile(
