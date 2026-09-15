@@ -308,6 +308,17 @@ class Tracker extends EventEmitter {
       running: this.running,
       captureMode: this.captureMode,
       trackedSeconds: this.day.trackedSeconds,
+      // Optimistic total for the UI only — never sent to the server (sync.js
+      // reads trackedSeconds directly). Includes the grace-window seconds
+      // that aren't confirmed yet, so the on-screen counter keeps ticking
+      // every second while the session is active instead of visibly
+      // freezing during a normal pause in typing/clicking/mouse movement.
+      // It converges back to trackedSeconds the instant the grace window
+      // resolves either way: confirmed (credited above) or abandoned (idle
+      // threshold reached, unconfirmedSeconds reset to 0) — so it can drop
+      // back down when real inactivity is confirmed, in sync with the
+      // "Bucket pausado" status shown at that same instant.
+      liveSeconds: this.day.trackedSeconds + (this.running ? this.unconfirmedSeconds : 0),
       date: this.day.date,
       isIdle: this.inIdle,
       idleSeconds: this.idleSeconds,

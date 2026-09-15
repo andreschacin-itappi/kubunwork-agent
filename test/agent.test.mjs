@@ -187,6 +187,45 @@ test("a pause under the threshold is credited in full once activity resumes", ()
   h.restore();
 });
 
+test("liveSeconds ticks through a grace-window pause for the display, then settles with trackedSeconds", () => {
+  // liveSeconds is what the renderer shows (see ui/app.js) — it must never
+  // visibly freeze during a normal pause in typing/clicking/mouse movement,
+  // even though trackedSeconds itself (what actually reaches the server)
+  // only resolves once the grace window is either confirmed or abandoned.
+  const h = makeTracker(); // 5-minute (300s) threshold
+  h.start();
+  h.advance(60); // 60s banked
+  assert.equal(h.tracker.snapshot().liveSeconds, 60);
+
+  h.setIdle(200); // grace window, not yet resolved either way
+  h.advance(50);
+  let snap = h.tracker.snapshot();
+  assert.equal(snap.trackedSeconds, 60, "not confirmed yet — unchanged");
+  assert.equal(snap.liveSeconds, 110, "the on-screen counter keeps ticking through the grace window");
+
+  // Confirmed idle: the held seconds are abandoned, and the live counter
+  // drops back down to match — in sync with the "Bucket pausado" status
+  // that flips on at the very same instant.
+  h.setIdle(300);
+  h.advance(1);
+  snap = h.tracker.snapshot();
+  assert.equal(snap.trackedSeconds, 60);
+  assert.equal(snap.liveSeconds, 60, "confirmed idle pulls the live counter back down to the banked total");
+
+  // A manual pause mid-grace-window must not leave the display inflated:
+  // liveSeconds while stopped ignores whatever grace seconds were still held.
+  h.setIdle(0);
+  h.tracker.start();
+  h.advance(5); // 65s banked
+  h.setIdle(50); // 50s short of the threshold
+  h.advance(20); // 20s held in the grace window
+  h.tracker.stop();
+  snap = h.tracker.snapshot();
+  assert.equal(snap.trackedSeconds, 65);
+  assert.equal(snap.liveSeconds, 65, "paused must show exactly the banked total, no optimistic grace seconds");
+  h.restore();
+});
+
 test("a paused timer records nothing", () => {
   const h = makeTracker();
   h.start();

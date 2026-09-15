@@ -558,8 +558,10 @@ test("the autostart toggle reaches the OS integration", async () => {
   const agent = await bootAgent();
   try {
     await agent.invoke("agent:set-autostart", true);
-    // --hidden keeps the window out of the way on a login-triggered launch.
-    assert.deepEqual(agent.electron.app.loginItem.args, ["--hidden"]);
+    // --hidden keeps the window out of the way on a login-triggered launch;
+    // --autostart is what lets bootstrap() tell that launch apart from a
+    // manual one or an auto-update relaunch (both also use --hidden alone).
+    assert.deepEqual(agent.electron.app.loginItem.args, ["--hidden", "--autostart"]);
 
     // The renderer only ever sees autoStart via agent:get-state — reading the
     // raw mock with mismatched args would mask a regression here.
@@ -571,5 +573,74 @@ test("the autostart toggle reaches the OS integration", async () => {
     assert.equal(state.autoStart, false);
   } finally {
     agent.restore();
+  }
+});
+
+test("only the login-item's own launch starts tracking by itself", async () => {
+  // The employee opted in via "Iniciar con Windows" (agent:set-autostart),
+  // so a launch carrying the exact args that toggle registers (--hidden
+  // --autostart) is the OS starting the app at boot — that one, and only
+  // that one, is allowed to press "Iniciar" on the employee's behalf.
+  const backend = await startFakeBackend();
+  const first = await bootAgent();
+  let userData;
+  try {
+    await first.invoke("agent:login", {
+      serverUrl: backend.url,
+      email: "ana@empresa.com",
+      password: "correcta",
+    });
+    await first.invoke("agent:set-autostart", true);
+    userData = first.userData;
+  } finally {
+    first.restore();
+  }
+
+  const originalArgv = process.argv;
+
+  // A plain --hidden relaunch — exactly what updater-helper.js does after
+  // every auto-update — must NOT start tracking on its own, even with the
+  // login item enabled, or a silent update would silently resume the clock.
+  const hiddenOnly = installElectronStub({ userData, hookAvailable: true });
+  try {
+    process.argv = [...originalArgv, "--hidden"];
+    for (const key of Object.keys(require.cache)) delete require.cache[key];
+    require("../src/main.js");
+    process.argv = originalArgv;
+    await hiddenOnly.electron.app._ready;
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const state = await hiddenOnly.invoke("agent:get-state");
+    assert.equal(
+      state.tracker.running,
+      false,
+      "un relanzamiento --hidden simple (p. ej. tras auto-update) no debe arrancar solo",
+    );
+  } finally {
+    process.argv = originalArgv;
+    hiddenOnly.restore();
+  }
+
+  // The real login-item launch passes --autostart too, and that one does
+  // start tracking on its own.
+  const bootLaunch = installElectronStub({ userData, hookAvailable: true });
+  try {
+    process.argv = [...originalArgv, "--hidden", "--autostart"];
+    for (const key of Object.keys(require.cache)) delete require.cache[key];
+    require("../src/main.js");
+    process.argv = originalArgv;
+    await bootLaunch.electron.app._ready;
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const state = await bootLaunch.invoke("agent:get-state");
+    assert.equal(
+      state.tracker.running,
+      true,
+      "con 'Iniciar con Windows' activado, el arranque del sistema sí empieza a medir solo",
+    );
+  } finally {
+    process.argv = originalArgv;
+    bootLaunch.restore();
+    backend.close();
   }
 });

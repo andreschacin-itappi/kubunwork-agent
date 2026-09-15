@@ -193,7 +193,7 @@ if (typeof document !== "undefined") {
     el.empDept.textContent = employee?.department || "—";
     el.serverLabel.textContent = state.serverUrl;
 
-    el.timer.textContent = formatHMS(tracker.trackedSeconds);
+    el.timer.textContent = formatHMS(tracker.liveSeconds);
 
     el.toggle.textContent = tracker.running ? "Pausar" : "Iniciar";
     el.toggle.classList.toggle("running", tracker.running);

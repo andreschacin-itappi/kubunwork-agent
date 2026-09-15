@@ -53,6 +53,20 @@ let lastUpdateCheckAt = 0;
 const REOPEN_UPDATE_CHECK_MIN_INTERVAL_MS = 5 * 60 * 1000;
 
 const startedHidden = process.argv.includes("--hidden");
+// Set only on the launch the OS performs for us via the "Iniciar con
+// Windows" login item (see AUTOSTART_LOGIN_ARGS) — never on a manual open,
+// and never on the relaunch after an auto-update (updater-helper.js always
+// relaunches with plain --hidden). This is what lets bootstrap() tell "the
+// PC just booted and the employee opted in" apart from every other hidden
+// launch, so only that one case is allowed to start tracking by itself.
+const startedFromAutostart = process.argv.includes("--autostart");
+
+// Args Electron passes to the login item Windows launches at boot. Must be
+// identical wherever we set it (agent:set-autostart) and wherever we read it
+// back (buildState) — Electron on Windows matches path+args against the
+// registry Run key, so a mismatched array reports openAtLogin as false even
+// when it's on.
+const AUTOSTART_LOGIN_ARGS = ["--hidden", "--autostart"];
 
 // A second instance would run a second global hook and double-count every
 // keystroke, so the first instance wins and simply reveals its window.
@@ -91,14 +105,18 @@ async function bootstrap() {
   createTray();
 
   if (api.token) {
-    // Deliberately does NOT auto-resume tracking (even if it was running
-    // before the app closed) — the employee decided that "Iniciar" should be
-    // an explicit, physical click every time the agent starts, whatever the
-    // reason (Windows boot, a manual relaunch, an auto-update). Syncing still
-    // resumes on its own so any queued buckets from before still go out.
+    // Does NOT auto-resume tracking on a manual relaunch or after an
+    // auto-update — "Iniciar" stays an explicit, physical click for those.
+    // Syncing still resumes on its own either way, so any queued buckets
+    // from before still go out.
     refreshConfig();
     syncer.start();
     pingServer();
+
+    // The one opt-in exception: this launch was the OS starting the app at
+    // boot AND the employee has "Iniciar con Windows" turned on, so start
+    // tracking the same way they would have by hand.
+    if (startedFromAutostart) tracker.start();
   }
   setInterval(pingServer, PING_INTERVAL_MS);
 
@@ -304,7 +322,7 @@ function updateTray() {
   const authed = Boolean(api.token);
 
   const menu = Menu.buildFromTemplate([
-    { label: authed ? `Hoy: ${formatHMS(snap.trackedSeconds)}` : "Sin sesión", enabled: false },
+    { label: authed ? `Hoy: ${formatHMS(snap.liveSeconds)}` : "Sin sesión", enabled: false },
     { type: "separator" },
     { label: "Abrir", click: () => showWindow() },
     {
@@ -318,7 +336,7 @@ function updateTray() {
   ]);
 
   tray.setContextMenu(menu);
-  tray.setToolTip(authed ? `Itappi Agent — ${snap.running ? "activo" : "en pausa"} — ${formatHMS(snap.trackedSeconds)}` : "Itappi Agent — sin sesión");
+  tray.setToolTip(authed ? `Itappi Agent — ${snap.running ? "activo" : "en pausa"} — ${formatHMS(snap.liveSeconds)}` : "Itappi Agent — sin sesión");
 }
 
 function quitApp() {
@@ -365,10 +383,7 @@ function buildState() {
       inFlight: syncer.inFlight,
     },
     config,
-    // Must pass the same args used in agent:set-autostart below — Electron on
-    // Windows compares path+args against the registry Run key, so reading it
-    // back without --hidden reports openAtLogin as false even when it's on.
-    autoStart: app.getLoginItemSettings({ args: ["--hidden"] }).openAtLogin,
+    autoStart: app.getLoginItemSettings({ args: AUTOSTART_LOGIN_ARGS }).openAtLogin,
   };
 }
 
@@ -464,7 +479,7 @@ ipcMain.handle("agent:sync-now", async () => {
 ipcMain.handle("agent:set-autostart", (_event, enabled) => {
   app.setLoginItemSettings({
     openAtLogin: Boolean(enabled),
-    args: ["--hidden"],
+    args: AUTOSTART_LOGIN_ARGS,
   });
   pushState();
   return { ok: true };
