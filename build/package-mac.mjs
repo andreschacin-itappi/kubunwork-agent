@@ -121,8 +121,23 @@ async function codesignInsideOut(appPath) {
     // Deepest first, so anything nested a level further down (e.g. a
     // framework inside a helper .app) is signed before its container.
     nested.sort((a, b) => b.split(sep).length - a.split(sep).length);
+
+    // Sign every item even if one fails, so a single bad component doesn't
+    // hide every other error behind it — then report all of them together
+    // and stop, since shipping an app with an unsigned/mis-signed nested
+    // helper is exactly the "no responde" bug this replaces --deep to fix.
+    const failures = [];
     for (const item of nested) {
-      run("codesign", ["--force", "--sign", "-", item]);
+      try {
+        run("codesign", ["--force", "--sign", "-", item]);
+      } catch (err) {
+        failures.push({ item, message: err.stderr?.toString?.() || err.message });
+      }
+    }
+    if (failures.length > 0) {
+      console.error(`\n  codesign falló en ${failures.length} componente(s) anidado(s):`);
+      for (const f of failures) console.error(`    ${f.item}\n      ${f.message.trim().split("\n").join("\n      ")}`);
+      throw new Error("Firma de componentes anidados fallida — ver detalle arriba.");
     }
   }
   run("codesign", ["--force", "--sign", "-", appPath]);
