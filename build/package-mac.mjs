@@ -17,7 +17,7 @@ import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { pipeline } from "node:stream/promises";
 import { Readable } from "node:stream";
-import { dirname, join, sep } from "node:path";
+import { basename, dirname, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 if (process.platform !== "darwin") {
@@ -150,6 +150,24 @@ async function isMachO(filePath) {
   }
 }
 
+/**
+ * True for a Mach-O file sitting exactly where Apple's bundle convention
+ * puts a bundle's OWN designated executable — Contents/MacOS/<name> for a
+ * .app, or Versions/<X>/<FrameworkName> for a .framework. Signing one of
+ * these individually doesn't just sign that file: codesign resolves the
+ * path back up to the enclosing bundle and tries to seal the *whole bundle*
+ * right then, which fails if that bundle's other loose binaries (Helpers/,
+ * Libraries/) haven't been signed yet — discovery order isn't guaranteed to
+ * visit them first. These are excluded from the loose-binary pass entirely;
+ * signing the bundle itself afterwards (once every real loose binary inside
+ * it is already signed) covers them correctly.
+ */
+function isBundlePrimaryExecutable(filePath) {
+  const parent = dirname(filePath);
+  if (basename(parent) === "MacOS") return true; // Contents/MacOS/<name>
+  return basename(dirname(parent)) === "Versions"; // Versions/<X>/<name>
+}
+
 async function codesignInsideOut(appPath) {
   const frameworksDir = join(appPath, "Contents", "Frameworks");
   if (await exists(frameworksDir)) {
@@ -163,7 +181,7 @@ async function codesignInsideOut(appPath) {
             bundles.push(full);
           }
           await walk(full);
-        } else if (entry.isFile() && (await isMachO(full))) {
+        } else if (entry.isFile() && !isBundlePrimaryExecutable(full) && (await isMachO(full))) {
           looseBinaries.push(full);
         }
       }
