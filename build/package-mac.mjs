@@ -103,6 +103,24 @@ async function buildIcns() {
  * macOS gives up and reports it "no responde" — it never gets the chance to
  * show anything. Signing inside-out avoids relying on --deep for that.
  */
+// Prints a GitHub Actions error annotation (visible via the Checks API's
+// annotations endpoint, not just buried in the raw log) — plain
+// console.error text does not become an annotation, only this workflow
+// command syntax does. %, CR and LF have to be escaped per GitHub's spec.
+function ghError(message) {
+  const escaped = String(message).replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A");
+  console.log(`::error::${escaped}`);
+}
+
+function codesignOne(item) {
+  try {
+    run("codesign", ["--force", "--sign", "-", item]);
+    return null;
+  } catch (err) {
+    return err.stderr?.toString?.() || err.message;
+  }
+}
+
 async function codesignInsideOut(appPath) {
   const frameworksDir = join(appPath, "Contents", "Frameworks");
   if (await exists(frameworksDir)) {
@@ -128,19 +146,20 @@ async function codesignInsideOut(appPath) {
     // helper is exactly the "no responde" bug this replaces --deep to fix.
     const failures = [];
     for (const item of nested) {
-      try {
-        run("codesign", ["--force", "--sign", "-", item]);
-      } catch (err) {
-        failures.push({ item, message: err.stderr?.toString?.() || err.message });
-      }
+      const error = codesignOne(item);
+      if (error) failures.push({ item, error });
     }
     if (failures.length > 0) {
-      console.error(`\n  codesign falló en ${failures.length} componente(s) anidado(s):`);
-      for (const f of failures) console.error(`    ${f.item}\n      ${f.message.trim().split("\n").join("\n      ")}`);
-      throw new Error("Firma de componentes anidados fallida — ver detalle arriba.");
+      for (const f of failures) ghError(`codesign falló en ${f.item}:\n${f.error}`);
+      throw new Error(`Firma de componentes anidados fallida (${failures.length}) — ver anotaciones del job.`);
     }
   }
-  run("codesign", ["--force", "--sign", "-", appPath]);
+
+  const outerError = codesignOne(appPath);
+  if (outerError) {
+    ghError(`codesign falló en ${appPath}:\n${outerError}`);
+    throw new Error("Firma del .app principal fallida — ver anotaciones del job.");
+  }
 }
 
 // --- build one architecture --------------------------------------------------
