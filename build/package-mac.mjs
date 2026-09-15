@@ -12,7 +12,7 @@
  *   arm64 → Apple Silicon (M1/M2/M3…)   x64 → Macs Intel
  */
 import { createWriteStream } from "node:fs";
-import { mkdir, rm, cp, readFile, writeFile, rename, stat, readdir, symlink } from "node:fs/promises";
+import { mkdir, rm, cp, readFile, writeFile, rename, stat, readdir, symlink, open } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { pipeline } from "node:stream/promises";
@@ -121,31 +121,63 @@ function codesignOne(item) {
   }
 }
 
+// mach-o/loader.h + fat.h magic numbers, both byte orders, 32/64-bit and
+// fat(universal): identifies a regular file as executable code regardless of
+// its name/extension/location — the crashpad_handler binary and the various
+// *.dylib under a framework's Libraries/ have neither a bundle extension nor
+// a predictable folder name, and codesign treats every one of them as a
+// "subcomponent" that must be signed before the framework containing it can
+// be sealed (see the "code object is not signed at all — in subcomponent:
+// .../chrome_crashpad_handler" failure this fixes).
+const MACHO_MAGICS = new Set([
+  0xfeedface, 0xcefaedfe, // 32-bit
+  0xfeedfacf, 0xcffaedfe, // 64-bit
+  0xcafebabe, 0xbebafeca, // fat/universal
+  0xcafebabf, 0xbfbafeca, // fat/universal, 64-bit fat_arch
+]);
+
+async function isMachO(filePath) {
+  let fh;
+  try {
+    fh = await open(filePath, "r");
+    const buf = Buffer.alloc(4);
+    const { bytesRead } = await fh.read(buf, 0, 4, 0);
+    return bytesRead === 4 && MACHO_MAGICS.has(buf.readUInt32BE(0));
+  } catch {
+    return false;
+  } finally {
+    await fh?.close();
+  }
+}
+
 async function codesignInsideOut(appPath) {
   const frameworksDir = join(appPath, "Contents", "Frameworks");
   if (await exists(frameworksDir)) {
-    const nested = [];
+    const bundles = [];
+    const looseBinaries = [];
     const walk = async (dir) => {
       for (const entry of await readdir(dir, { withFileTypes: true })) {
-        if (!entry.isDirectory()) continue;
         const full = join(dir, entry.name);
-        if ([".app", ".framework", ".xpc"].some((ext) => entry.name.endsWith(ext))) {
-          nested.push(full);
+        if (entry.isDirectory()) {
+          if ([".app", ".framework", ".xpc"].some((ext) => entry.name.endsWith(ext))) {
+            bundles.push(full);
+          }
+          await walk(full);
+        } else if (entry.isFile() && (await isMachO(full))) {
+          looseBinaries.push(full);
         }
-        await walk(full);
       }
     };
     await walk(frameworksDir);
     // Deepest first, so anything nested a level further down (e.g. a
     // framework inside a helper .app) is signed before its container.
-    nested.sort((a, b) => b.split(sep).length - a.split(sep).length);
+    bundles.sort((a, b) => b.split(sep).length - a.split(sep).length);
 
-    // Sign every item even if one fails, so a single bad component doesn't
-    // hide every other error behind it — then report all of them together
-    // and stop, since shipping an app with an unsigned/mis-signed nested
-    // helper is exactly the "no responde" bug this replaces --deep to fix.
+    // Loose binaries first (nothing contains them), then bundles inside-out,
+    // then finally the top-level app — sign every item even if one fails, so
+    // a single bad component doesn't hide every other error behind it.
     const failures = [];
-    for (const item of nested) {
+    for (const item of [...looseBinaries, ...bundles]) {
       const error = codesignOne(item);
       if (error) failures.push({ item, error });
     }
